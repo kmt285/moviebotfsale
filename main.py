@@ -1,4 +1,5 @@
 import os
+import time
 import telebot
 from flask import Flask
 from threading import Thread
@@ -65,16 +66,15 @@ def set_force(message):
         if len(args) < 3: return bot.reply_to(message, "Usage: `/setforce ID Link`", parse_mode="Markdown")
         update_config("force_channel_id", int(args[1]))
         update_config("force_channel_link", args[2])
-        bot.reply_to(message, "✅ Force Channel Set!")
+        bot.reply_to(message, "✅ Force Subscribe Channel Set!")
     except: bot.reply_to(message, "❌ Error")
 
 @bot.message_handler(commands=['setdb'], func=lambda m: is_admin(m.from_user.id))
 def set_db(message):
     try:
-        # DB Channel ID ကို သိမ်းမည်
         db_id = int(message.text.split()[1])
         update_config("db_channel_id", db_id)
-        bot.reply_to(message, f"✅ Database Channel သတ်မှတ်ပြီးပါပြီ!\nTarget ID: `{db_id}`\n\n(ယခုမှစ၍ ဤ Channel မှ Forward လုပ်မှသာ Link ထုတ်ပေးပါမည်)", parse_mode="Markdown")
+        bot.reply_to(message, f"✅ DB Channel Set: `{db_id}`", parse_mode="Markdown")
     except: bot.reply_to(message, "❌ Error")
 
 @bot.message_handler(commands=['status'], func=lambda m: is_admin(m.from_user.id))
@@ -82,35 +82,76 @@ def status(message):
     conf = get_config()
     bot.reply_to(message, f"⚙️ Config:\nForce: `{conf.get('force_channel_id')}`\nDB: `{conf.get('db_channel_id')}`", parse_mode="Markdown")
 
-# --- ၅။ Strict File Handler (အဓိက ပြင်ဆင်ထားသောအပိုင်း) ---
+# --- ၅။ Backup Command (New Feature) ---
+def backup_task(admin_id, target_ch, start_id, end_id, source_db):
+    """Backup လုပ်ဆောင်မည့် Background Task"""
+    bot.send_message(admin_id, f"🚀 **Backup Started!**\nFrom ID: {start_id} to {end_id}\nTarget: `{target_ch}`")
+    
+    success = 0
+    failed = 0
+    
+    for msg_id in range(start_id, end_id + 1):
+        try:
+            # Copy message from Source DB to Target Channel
+            bot.copy_message(chat_id=target_ch, from_chat_id=source_db, message_id=msg_id)
+            success += 1
+            # Flood Limit ကာကွယ်ရန် 3 စက္ကန့် နားသည်
+            time.sleep(3) 
+        except Exception as e:
+            # Message မရှိရင် (သို့) Error တက်ရင် ကျော်မည်
+            failed += 1
+            print(f"Backup Error at ID {msg_id}: {e}")
+            continue
+            
+    bot.send_message(admin_id, f"✅ **Backup Completed!**\n\nTotal: {success + failed}\nSuccess: {success}\nSkipped/Failed: {failed}")
+
+@bot.message_handler(commands=['backup'], func=lambda m: is_admin(m.from_user.id))
+def backup_command(message):
+    # Format: /backup -100xxxxxx 100 200
+    config = get_config()
+    source_db = config.get('db_channel_id')
+    
+    if not source_db:
+        return bot.reply_to(message, "❌ DB Channel မသတ်မှတ်ရသေးပါ။")
+        
+    try:
+        args = message.text.split()
+        if len(args) < 4:
+            return bot.reply_to(message, "⚠️ Usage: `/backup [Target_Ch_ID] [Start_ID] [End_ID]`", parse_mode="Markdown")
+        
+        target_ch = int(args[1])
+        start_id = int(args[2])
+        end_id = int(args[3])
+        
+        # Thread အသစ်ဖြင့် run ပါမည် (Main Bot မရပ်သွားစေရန်)
+        Thread(target=backup_task, args=(message.chat.id, target_ch, start_id, end_id, source_db)).start()
+        
+    except ValueError:
+        bot.reply_to(message, "❌ ID များသည် ဂဏန်းဖြစ်ရပါမည်။")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+# --- ၆။ Strict File Handler ---
 @bot.message_handler(content_types=['video', 'document', 'audio'], func=lambda m: is_admin(m.from_user.id))
 def handle_admin_file(message):
     config = get_config()
     db_id = config.get('db_channel_id')
 
-    # ၁။ DB Channel မသတ်မှတ်ရသေးရင် ဘာမှမလုပ်
-    if not db_id:
-        return bot.reply_to(message, "❌ DB Channel မသတ်မှတ်ရသေးပါ။ `/setdb` အရင်လုပ်ပါ။")
-
-    # ၂။ Forward ဟုတ်မဟုတ် နှင့် DB Channel က ဟုတ်မဟုတ် စစ်ဆေးခြင်း
+    if not db_id: return bot.reply_to(message, "❌ DB Channel Not Set.")
+    
+    # Check if forwarded from DB Channel
     if not message.forward_from_chat or message.forward_from_chat.id != int(db_id):
-        # DB Channel မဟုတ်ရင် ငြင်းပယ်မည်
-        return bot.reply_to(message, "⚠️ **Action Denied!**\n\nBot သည် သတ်မှတ်ထားသော **Database Channel** ထဲမှ Forward လုပ်လာသည့် ဖိုင်များကိုသာ လက်ခံပါသည်။\n(အသစ် Upload တင်ခြင်း/အခြား Channel မှ ကူးခြင်းများကို လက်မခံပါ)")
+        return bot.reply_to(message, "⚠️ **Action Denied!**")
 
-    # ၃။ DB Channel က Forward လုပ်တာသေချာပြီ (Link ထုတ်ပေးမည်)
     try:
-        # မူရင်း Message ID ကို ယူသည် (Copy မကူးပါ)
         original_id = message.forward_from_message_id
-        
         bot_username = bot.get_me().username
         share_link = f"https://t.me/{bot_username}?start={original_id}"
-        
-        bot.reply_to(message, f"✅ **File Linked!**\n\nID: `{original_id}`\nLink: `{share_link}`", parse_mode="Markdown")
-
+        bot.reply_to(message, f"✅ **Link Created!**\nID: `{original_id}`\nLink: `{share_link}`", parse_mode="Markdown")
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
 
-# --- ၆။ User Logic ---
+# --- ၇။ User Logic ---
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
@@ -131,10 +172,9 @@ def start(message):
 def send_file(user_id, msg_id):
     config = get_config()
     try:
-        # DB Channel ထဲက ID အတိုင်း လှမ်းယူပြီး Copy ပို့ပေးသည်
         bot.copy_message(user_id, config.get('db_channel_id'), int(msg_id))
     except:
-        bot.send_message(user_id, "❌ File Not Found (Source Message might be deleted)")
+        bot.send_message(user_id, "❌ File Not Found")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('check_'))
 def check(call):
