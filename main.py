@@ -25,7 +25,7 @@ try:
 except Exception as e:
     print(f"❌ MongoDB Connection Error: {e}")
 
-# --- ၂။ Flask Server ---
+# --- ၂။ Flask Server (Keep Alive) ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is running!"
@@ -57,7 +57,7 @@ def is_joined(user_id):
     except: return True
     return False
 
-# --- ၄။ Admin Commands (Setup) ---
+# --- ၄။ Admin Setup Commands ---
 @bot.message_handler(commands=['setforce'], func=lambda m: is_admin(m.from_user.id))
 def set_force(message):
     try:
@@ -71,8 +71,10 @@ def set_force(message):
 @bot.message_handler(commands=['setdb'], func=lambda m: is_admin(m.from_user.id))
 def set_db(message):
     try:
-        update_config("db_channel_id", int(message.text.split()[1]))
-        bot.reply_to(message, "✅ DB Channel Set!")
+        # DB Channel ID ကို သိမ်းမည်
+        db_id = int(message.text.split()[1])
+        update_config("db_channel_id", db_id)
+        bot.reply_to(message, f"✅ Database Channel သတ်မှတ်ပြီးပါပြီ!\nTarget ID: `{db_id}`\n\n(ယခုမှစ၍ ဤ Channel မှ Forward လုပ်မှသာ Link ထုတ်ပေးပါမည်)", parse_mode="Markdown")
     except: bot.reply_to(message, "❌ Error")
 
 @bot.message_handler(commands=['status'], func=lambda m: is_admin(m.from_user.id))
@@ -80,38 +82,35 @@ def status(message):
     conf = get_config()
     bot.reply_to(message, f"⚙️ Config:\nForce: `{conf.get('force_channel_id')}`\nDB: `{conf.get('db_channel_id')}`", parse_mode="Markdown")
 
-# --- ၅။ File Handling & Link Generation (New Feature) ---
+# --- ၅။ Strict File Handler (အဓိက ပြင်ဆင်ထားသောအပိုင်း) ---
 @bot.message_handler(content_types=['video', 'document', 'audio'], func=lambda m: is_admin(m.from_user.id))
 def handle_admin_file(message):
-    """Admin က ဖိုင်ပို့ရင် Link ထုတ်ပေးမည့် Function"""
     config = get_config()
     db_id = config.get('db_channel_id')
 
+    # ၁။ DB Channel မသတ်မှတ်ရသေးရင် ဘာမှမလုပ်
     if not db_id:
-        return bot.reply_to(message, "❌ DB Channel မသတ်မှတ်ရသေးပါ။ `/setdb` အရင်လုပ်ပါ။", parse_mode="Markdown")
+        return bot.reply_to(message, "❌ DB Channel မသတ်မှတ်ရသေးပါ။ `/setdb` အရင်လုပ်ပါ။")
 
-    target_msg_id = None
+    # ၂။ Forward ဟုတ်မဟုတ် နှင့် DB Channel က ဟုတ်မဟုတ် စစ်ဆေးခြင်း
+    if not message.forward_from_chat or message.forward_from_chat.id != int(db_id):
+        # DB Channel မဟုတ်ရင် ငြင်းပယ်မည်
+        return bot.reply_to(message, "⚠️ **Action Denied!**\n\nBot သည် သတ်မှတ်ထားသော **Database Channel** ထဲမှ Forward လုပ်လာသည့် ဖိုင်များကိုသာ လက်ခံပါသည်။\n(အသစ် Upload တင်ခြင်း/အခြား Channel မှ ကူးခြင်းများကို လက်မခံပါ)")
 
+    # ၃။ DB Channel က Forward လုပ်တာသေချာပြီ (Link ထုတ်ပေးမည်)
     try:
-        # ၁။ DB Channel က Forward လုပ်လာတာလား စစ်မယ်
-        if message.forward_from_chat and message.forward_from_chat.id == int(db_id):
-            # ဟုတ်တယ်ဆိုရင် မူရင်း ID ကိုပဲ ယူသုံးမယ် (ထပ်မသိမ်းဘူး)
-            target_msg_id = message.forward_from_message_id
-        else:
-            # ၂။ အသစ်တင်တာဆိုရင် DB Channel ထဲ လှမ်းပို့ပြီး သိမ်းမယ်
-            sent_msg = bot.copy_message(chat_id=db_id, from_chat_id=message.chat.id, message_id=message.message_id)
-            target_msg_id = sent_msg.message_id
-
-        # Link ထုတ်ပေးခြင်း
-        bot_username = bot.get_me().username
-        share_link = f"https://t.me/{bot_username}?start={target_msg_id}"
+        # မူရင်း Message ID ကို ယူသည် (Copy မကူးပါ)
+        original_id = message.forward_from_message_id
         
-        bot.reply_to(message, f"✅ **Link Created!**\n\nOriginal ID: `{target_msg_id}`\nLink: `{share_link}`", parse_mode="Markdown")
+        bot_username = bot.get_me().username
+        share_link = f"https://t.me/{bot_username}?start={original_id}"
+        
+        bot.reply_to(message, f"✅ **File Linked!**\n\nID: `{original_id}`\nLink: `{share_link}`", parse_mode="Markdown")
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Error: {e}\n(Bot သည် DB Channel တွင် Admin ဖြစ်မဖြစ် စစ်ပါ)")
+        bot.reply_to(message, f"❌ Error: {e}")
 
-# --- ၆။ User Start & Get File ---
+# --- ၆။ User Logic ---
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
@@ -132,9 +131,10 @@ def start(message):
 def send_file(user_id, msg_id):
     config = get_config()
     try:
+        # DB Channel ထဲက ID အတိုင်း လှမ်းယူပြီး Copy ပို့ပေးသည်
         bot.copy_message(user_id, config.get('db_channel_id'), int(msg_id))
     except:
-        bot.send_message(user_id, "❌ File Not Found")
+        bot.send_message(user_id, "❌ File Not Found (Source Message might be deleted)")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('check_'))
 def check(call):
