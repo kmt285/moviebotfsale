@@ -7,6 +7,7 @@ from telebot import types
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
+# Load .env file
 load_dotenv()
 
 # --- ၁။ Configuration ---
@@ -15,7 +16,8 @@ MONGO_URI = os.getenv('MONGO_URI')
 admin_env = os.getenv('ADMIN_IDS', '')
 ADMIN_IDS = [int(i) for i in admin_env.split(',') if i.strip()]
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# Connection Error မတက်အောင် Threaded false ထားပြီး Exception handle လုပ်ပါမယ်
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
 
 # MongoDB Setup
 try:
@@ -28,22 +30,32 @@ except Exception as e:
 
 # --- ၂။ Flask Server (Keep Alive) ---
 app = Flask('')
+
 @app.route('/')
-def home(): return "Bot is running!"
+def home():
+    return "Bot is running 24/7!"
 
 def run():
+    # Errors တွေကို Suppress လုပ်ပြီး Port ကို Environment ကနေယူပါမယ်
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
 
 def keep_alive():
-    Thread(target=run).start()
+    t = Thread(target=run)
+    t.daemon = True # Main thread ပိတ်ရင် ဒါပါပိတ်အောင်
+    t.start()
 
 # --- ၃။ Helper Functions ---
 def get_config():
-    data = config_col.find_one({"_id": "bot_settings"})
-    return data if data else {}
+    try:
+        data = config_col.find_one({"_id": "bot_settings"})
+        return data if data else {}
+    except: return {}
 
 def update_config(key, value):
-    config_col.update_one({"_id": "bot_settings"}, {"$set": {key: value}}, upsert=True)
+    try:
+        config_col.update_one({"_id": "bot_settings"}, {"$set": {key: value}}, upsert=True)
+    except Exception as e:
+        print(f"DB Error: {e}")
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
@@ -82,23 +94,18 @@ def status(message):
     conf = get_config()
     bot.reply_to(message, f"⚙️ Config:\nForce: `{conf.get('force_channel_id')}`\nDB: `{conf.get('db_channel_id')}`", parse_mode="Markdown")
 
-# --- ၅။ Backup Command (New Feature) ---
+# --- ၅။ Backup Command ---
 def backup_task(admin_id, target_ch, start_id, end_id, source_db):
-    """Backup လုပ်ဆောင်မည့် Background Task"""
     bot.send_message(admin_id, f"🚀 **Backup Started!**\nFrom ID: {start_id} to {end_id}\nTarget: `{target_ch}`")
-    
     success = 0
     failed = 0
     
     for msg_id in range(start_id, end_id + 1):
         try:
-            # Copy message from Source DB to Target Channel
             bot.copy_message(chat_id=target_ch, from_chat_id=source_db, message_id=msg_id)
             success += 1
-            # Flood Limit ကာကွယ်ရန် 3 စက္ကန့် နားသည်
             time.sleep(3) 
         except Exception as e:
-            # Message မရှိရင် (သို့) Error တက်ရင် ကျော်မည်
             failed += 1
             print(f"Backup Error at ID {msg_id}: {e}")
             continue
@@ -107,7 +114,6 @@ def backup_task(admin_id, target_ch, start_id, end_id, source_db):
 
 @bot.message_handler(commands=['backup'], func=lambda m: is_admin(m.from_user.id))
 def backup_command(message):
-    # Format: /backup -100xxxxxx 100 200
     config = get_config()
     source_db = config.get('db_channel_id')
     
@@ -123,7 +129,6 @@ def backup_command(message):
         start_id = int(args[2])
         end_id = int(args[3])
         
-        # Thread အသစ်ဖြင့် run ပါမည် (Main Bot မရပ်သွားစေရန်)
         Thread(target=backup_task, args=(message.chat.id, target_ch, start_id, end_id, source_db)).start()
         
     except ValueError:
@@ -139,9 +144,8 @@ def handle_admin_file(message):
 
     if not db_id: return bot.reply_to(message, "❌ DB Channel Not Set.")
     
-    # Check if forwarded from DB Channel
     if not message.forward_from_chat or message.forward_from_chat.id != int(db_id):
-        return bot.reply_to(message, "⚠️ **Action Denied!**")
+        return bot.reply_to(message, "⚠️ **Action Denied!** Only Forwarded files from DB Channel.")
 
     try:
         original_id = message.forward_from_message_id
@@ -167,14 +171,14 @@ def start(message):
         return bot.send_message(user_id, "⚠️ **Channel Join ပေးပါ**", reply_markup=markup, parse_mode="Markdown")
 
     if payload != "only": send_file(user_id, payload)
-    else: bot.send_message(user_id, "✅ Bot Ready!")
+    else: bot.send_message(user_id, "✅ **Bot is Online!**")
 
 def send_file(user_id, msg_id):
     config = get_config()
     try:
         bot.copy_message(user_id, config.get('db_channel_id'), int(msg_id))
     except:
-        bot.send_message(user_id, "❌ File Not Found")
+        bot.send_message(user_id, "❌ File Not Found or Deleted.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('check_'))
 def check(call):
@@ -185,6 +189,17 @@ def check(call):
         else: bot.send_message(call.message.chat.id, "✅ Success")
     else: bot.answer_callback_query(call.id, "❌ Not Joined", show_alert=True)
 
+# --- ၈။ Execution (Modified for 24/7) ---
 if __name__ == "__main__":
-    keep_alive()
-    bot.infinity_polling()
+    keep_alive() # Flask Server run မည်
+    print("🤖 Bot is starting...")
+    
+    # Auto-Restart Loop
+    while True:
+        try:
+            # timeout နှင့် long_polling_timeout ထည့်ခြင်းက connection ငြိမ်စေသည်
+            bot.infinity_polling(timeout=10, long_polling_timeout=5, skip_pending=True)
+        except Exception as e:
+            print(f"⚠️ Bot Crashed: {e}")
+            time.sleep(5) # Error တက်ရင် 5 စက္ကန့်နားပြီး ပြန် run မည်
+            print("♻️ Restarting Bot...")
